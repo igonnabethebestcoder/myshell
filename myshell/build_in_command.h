@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+int check_build_in_command()
+{
 
+}
 #endif // !BUILD_IN_COMMANDS_H
 

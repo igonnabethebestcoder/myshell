@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <pwd.h>
 #include <fcntl.h>
+#include "build_in_command.h"
 
 //输入缓冲区最大限制
 #define BUF_SIZE 1024
@@ -76,9 +77,9 @@ int* pipe_fd;
 const char* SEP = " ";//命令分隔符
 const char* PAR = "&";//后台并行
 const char* PIPE = "|";//管道
-const char* REDIR_IN = "<";//输入重定向
-const char* REDIR_OUT = ">";//输出重定向
-const char* REDIR_APP = ">>";//追加重定向
+const char* REDIR_IN_CHAR = "<";//输入重定向
+const char* REDIR_OUT_CHAR = ">";//输出重定向
+const char* REDIR_APP_CHAR = ">>";//追加重定向
 
 
 /// @brief 提示词
@@ -104,7 +105,6 @@ int splitAtomicCmd(char* cmdString, int index);//分词单个原子指令,检查重定向
 void splitBGcmdAndRun(char* bgcommand);//解析每一个后台命令并运行, 后台命令包含管道和重定向
 
 /// @brief 命令检查
-void checkCommandvalidity();//检查命令的有效性，是否需要？
 int checkRedirection(atomic_command* cmd);//检测原子命令是否有重定向
 
 /// @brief 执行命令
@@ -115,6 +115,21 @@ void reportError(int ERROR_TYPE);
 
 /// @brief DEBUG,打印原子指令结构体函数
 void printAtomicCommand(atomic_command* cmd);
+
+//shell内置命令
+#define NOT_BUILD_IN 0
+#define CD_COMMAND 1
+#define HELP_COMMAND 2
+#define EXPORT_COMMAND 3
+#define EXIT_COMMAND 4
+#define PWD_COMMAND 5
+int check_build_in_command(char* command);
+int cd_command(char* path);
+int help_command();
+int export_command(char* var);
+int exit_command();
+int pwd_command();
+int call_build_in_command(int cmdtype,  char* args);
 
 int main()
 {
@@ -191,6 +206,7 @@ void initPrompt()
         exit(ERROR_SYSTEM);
     }
     getUsername();
+
     getHostname();
 
     // 格式化提示符，存储在 prompt 中
@@ -232,7 +248,7 @@ void free_pipe_fd()
 
 void updatePrompt()
 {
-
+    initPrompt();
 }
 
 //清空输入缓冲区
@@ -346,7 +362,8 @@ void splitBGcmdAndRun(char* bgcommand)
 {
     char* token = NULL;
     int index = 0;
-
+    int command_type = 0;
+    int splitres = 0;
     //使用 | 分割后台命令为原子命令
     token = strtok(bgcommand, PIPE);
     while (token != NULL)
@@ -359,19 +376,26 @@ void splitBGcmdAndRun(char* bgcommand)
     //将原子命令字符串转化成原子命令结构体
     for (int i = 0; i < index; ++i)
     {
-        splitAtomicCmd(atomCmdString[i], i);
-        //printAtomicCommand(atomCmd[i]);
-        //printf("\n\n");
-    }
+        splitres = splitAtomicCmd(atomCmdString[i], i);
+        if (splitres != RESULT_NORMAL)
+        {
+            reportError(splitres);
+            return;
+        }
 
+        //检查是否是内置命令
+        command_type = check_build_in_command(atomCmd[i]->command);
+        if (command_type != 0)
+        {
+            call_build_in_command(command_type, atomCmd[i]->argv[1]);
+            return;
+        }
+    }
+    
     //执行每一条原子指令,重定向优先级高于管道
     callCommand(index);
 }
 
-void checkCommandvalidity()
-{
-
-}
 
 //检查原子命令的重定向
 int checkRedirection(atomic_command* cmd)
@@ -388,7 +412,7 @@ int checkRedirection(atomic_command* cmd)
     while (cmd->argv[index] != NULL)
     {
         // 检查输入重定向
-        if (strcmp(cmd->argv[index], REDIR_IN) == 0) {
+        if (strcmp(cmd->argv[index], REDIR_IN_CHAR) == 0) {
             // 只有输入重定向符号，没有文件名
             if (cmd->argv[index + 1] == NULL) {
                 return ERROR_MISS_PARAMETER;  // 缺失输入文件名
@@ -402,10 +426,21 @@ int checkRedirection(atomic_command* cmd)
             cmd->redir_in_filename = cmd->argv[index + 1];
             cmd->redir_type |= REDIR_INPUT;
             redir_in_count++;
+            // 将重定向符号和文件名从参数列表中移除，并将后续参数前移
+            cmd->argv[index] = NULL;
+            cmd->argv[index + 1] = NULL;
+
+            // 移动后续参数
+            int i = index + 2;
+            while (cmd->argv[i] != NULL) {
+                cmd->argv[i - 2] = cmd->argv[i];
+                cmd->argv[i] = NULL;
+                i++;
+            }
             index += 2;  // 跳过输入重定向符号和文件名
         }
         // 检查输出重定向
-        else if (strcmp(cmd->argv[index], REDIR_OUT) == 0) {
+        else if (strcmp(cmd->argv[index], REDIR_OUT_CHAR) == 0) {
             // 只有输出重定向符号，没有文件名
             if (cmd->argv[index + 1] == NULL) {
                 return ERROR_MISS_PARAMETER;  // 缺失输出文件名
@@ -419,10 +454,22 @@ int checkRedirection(atomic_command* cmd)
             cmd->redir_out_filename = cmd->argv[index + 1];
             cmd->redir_type |= REDIR_OUTPUT;
             redir_out_count++;
+
+            // 将重定向符号和文件名从参数列表中移除，并将后续参数前移
+            cmd->argv[index] = NULL;
+            cmd->argv[index + 1] = NULL;
+
+            // 移动后续参数
+            int i = index + 2;
+            while (cmd->argv[i] != NULL) {
+                cmd->argv[i - 2] = cmd->argv[i];
+                cmd->argv[i] = NULL;
+                i++;
+            }
             index += 2;  // 跳过输出重定向符号和文件名
         }
         // 检查追加输出重定向
-        else if (strcmp(cmd->argv[index], REDIR_APP) == 0) {
+        else if (strcmp(cmd->argv[index], REDIR_APP_CHAR) == 0) {
             // 只有追加重定向符号，没有文件名
             if (cmd->argv[index + 1] == NULL) {
                 return ERROR_MISS_PARAMETER;  // 缺失追加文件名
@@ -436,6 +483,17 @@ int checkRedirection(atomic_command* cmd)
             cmd->redir_out_filename = cmd->argv[index + 1];
             cmd->redir_type |= REDIR_APPEND;
             redir_app_count++;
+            // 将重定向符号和文件名从参数列表中移除，并将后续参数前移
+            cmd->argv[index] = NULL;
+            cmd->argv[index + 1] = NULL;
+
+            // 移动后续参数
+            int i = index + 2;
+            while (cmd->argv[i] != NULL) {
+                cmd->argv[i - 2] = cmd->argv[i];
+                cmd->argv[i] = NULL;
+                i++;
+            }
             index += 2;  // 跳过追加重定向符号和文件名
         }
         else {
@@ -452,9 +510,16 @@ int checkRedirection(atomic_command* cmd)
     }
 
     // 检查输出文件是否存在
-    if (cmd->redir_out_filename != NULL || cmd->redir_out_filename != NULL) {
+    if (cmd->redir_out_filename != NULL) {
         if (access(cmd->redir_out_filename, F_OK) == -1) {
-            return ERROR_FILE_NOT_EXIST;  // 输出文件不存在
+            int fd = open(cmd->redir_out_filename, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+            if (fd == -1) {
+                perror("Failed to open or create file");
+                return ERROR_FILE_NOT_EXIST;  // 文件无法打开或创建
+            }
+
+            close(fd);
+            printf("create file %s", cmd->redir_out_filename);
         }
     }
 
@@ -505,10 +570,10 @@ int callCommand(int num_cmd)
             // 处理输出重定向
             if (atomCmd[i]->redir_out_filename != NULL) {
                 int out_fd;
-                if (atomCmd[i]->redir_type == 1) {  // 处理 `>`
+                if ((atomCmd[i]->redir_type & REDIR_OUTPUT) != 0) {  // 处理 `>`
                     out_fd = open(atomCmd[i]->redir_out_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 }
-                else if (atomCmd[i]->redir_type == 2) {  // 处理 `>>`
+                else if ((atomCmd[i]->redir_type & REDIR_APPEND) != 0) {  // 处理 `>>`
                     out_fd = open(atomCmd[i]->redir_out_filename, O_WRONLY | O_CREAT | O_APPEND, 0644);
                 }
                 if (out_fd == -1) {
@@ -522,19 +587,27 @@ int callCommand(int num_cmd)
                 close(out_fd);
             }
 
-            // 如果不是第一个命令，重定向输入为前一个管道的读端
-            if (i > 0) {
-                if (dup2(pipe_fd[(i - 1) * 2], STDIN_FILENO) == -1) {
-                    perror("dup2 stdin failed");
-                    exit(1);
+            //没有输入重定向
+            if ((atomCmd[i]->redir_type & REDIR_INPUT) == 0)
+            {
+                // 如果不是第一个命令，重定向输入为前一个管道的读端
+                if (i > 0) {
+                    if (dup2(pipe_fd[(i - 1) * 2], STDIN_FILENO) == -1) {
+                        perror("dup2 stdin failed");
+                        exit(1);
+                    }
                 }
             }
 
-            // 如果不是最后一个命令，重定向输出为当前管道的写端
-            if (i < num_cmd - 1) {
-                if (dup2(pipe_fd[i * 2 + 1], STDOUT_FILENO) == -1) {
-                    perror("dup2 stdout failed");
-                    exit(1);
+            //没有输出重定向或追加从定向
+            if ((atomCmd[i]->redir_type & REDIR_OUTPUT) == 0 && (atomCmd[i]->redir_type & REDIR_APPEND) == 0)
+            {
+                // 如果不是最后一个命令，重定向输出为当前管道的写端
+                if (i < num_cmd - 1) {
+                    if (dup2(pipe_fd[i * 2 + 1], STDOUT_FILENO) == -1) {
+                        perror("dup2 stdout failed");
+                        exit(1);
+                    }
                 }
             }
 
@@ -560,11 +633,6 @@ int callCommand(int num_cmd)
     for (int i = 0; i < num_cmd; ++i) {
         wait(NULL);
     }
-}
-
-void reportError(int ERROR_TYPE)
-{
-
 }
 
 //DEBUG
@@ -620,4 +688,198 @@ void printAtomicCommand(atomic_command* cmd)
         printf("None ");
     }
     printf("\n");
+}
+
+// 检查是否是内置命令
+int check_build_in_command(char* command) {
+    if (strcmp(command, "cd") == 0) {
+        return CD_COMMAND; // cd 命令
+    }
+    else if (strcmp(command, "help") == 0) {
+        return HELP_COMMAND; // help 命令
+    }
+    else if (strcmp(command, "export") == 0) {
+        return EXPORT_COMMAND; // export 命令
+    }
+    else if (strcmp(command, "exit") == 0) {
+        return EXIT_COMMAND; // exit 命令
+    }
+    else if (strcmp(command, "pwd") == 0) {
+        return PWD_COMMAND; // pwd 命令
+    }
+    else {
+        return 0; // 不是内置命令
+    }// cd 命令：切换工作目录
+}
+
+
+int cd_command(char* path) {
+    if (path == NULL || strcmp(path, "") == 0) {
+        path = getenv("HOME"); // 默认切换到 HOME 目录
+        if (path == NULL) {
+            fprintf(stderr, "cd: No HOME directory set\n");
+            return -1;
+        }
+    }
+
+    // 尝试更改目录
+    if (chdir(path) == -1) {
+        perror("cd failed");
+        return -1;
+    } else {
+        char cwd[BUF_SIZE];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            printf("Changed directory to: %s\n", cwd);
+        }
+    }
+
+    updatePrompt();
+
+    return 0;
+}
+
+// help 命令：显示帮助信息
+int help_command() {
+    printf("Available commands:\n");
+    printf("cd <dir>      : Change directory to <dir>\n");
+    printf("help          : Show this help message\n");
+    printf("export <var>  : Set environment variable\n");
+    printf("exit          : Exit the shell\n");
+    printf("pwd           : Show current working directory\n");
+    return 0;
+}
+
+// export 命令：设置环境变量
+int export_command(char* var) {
+    char* value = strchr(var, '='); // 查找等号
+    if (value != NULL) {
+        *value = '\0'; // 将等号替换成 '\0'，分割变量名和变量值
+        value++; // 移动到等号后面的值
+        if (setenv(var, value, 1) == -1) {
+            perror("export failed");
+            return -1;
+        }
+        printf("Exported: %s=%s\n", var, value);
+    } else {
+        fprintf(stderr, "export: invalid format\n");
+        return -1;
+    }
+    return 0;
+}
+
+// exit 命令：退出 shell
+int exit_command() {
+    printf("Exiting shell...\n");
+    exit(0); // 退出 shell
+}
+
+// pwd 命令：显示当前工作目录
+int pwd_command() {
+    char cwd[BUF_SIZE];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        printf("Current directory: %s\n", cwd);
+    } else {
+        perror("pwd failed");
+        return -1;
+    }
+    return 0;
+}
+
+// 处理命令并执行
+int call_build_in_command(int cmdtype, char* args)
+{
+    switch (cmdtype) {
+        case CD_COMMAND: // cd 命令
+            return cd_command(args);
+        case HELP_COMMAND: // help 命令
+            return help_command();
+        case EXPORT_COMMAND: // export 命令
+            return export_command(args);
+        case EXIT_COMMAND: // exit 命令
+            return exit_command();
+        case PWD_COMMAND: // pwd 命令
+            return pwd_command();
+        default:
+            fprintf(stderr, "Command not found!\n");
+            return -1;
+    }
+}
+
+// 错误报告函数
+void reportError(int ERROR_TYPE) {
+    switch (ERROR_TYPE) {
+    case RESULT_NORMAL:
+        // 正常情况，不需要输出
+        break;
+
+    case ERROR_FORK:
+        perror("Fork failed");
+        break;
+
+    case ERROR_COMMAND:
+        fprintf(stderr, "Error: Command not found.\n");
+        break;
+
+    case ERROR_WRONG_PARAMETER:
+        fprintf(stderr, "Error: Incorrect parameters.\n");
+        break;
+
+    case ERROR_MISS_PARAMETER:
+        fprintf(stderr, "Error: Missing parameters.\n");
+        break;
+
+    case ERROR_TOO_MANY_PARAMETER:
+        fprintf(stderr, "Error: Too many parameters.\n");
+        break;
+
+    case ERROR_CD:
+        perror("cd failed");
+        break;
+
+    case ERROR_SYSTEM:
+        perror("System error");
+        break;
+
+    case ERROR_MEMORY_ALLOCATION:
+        fprintf(stderr, "Error: Memory allocation failed.\n");
+        break;
+
+    case ERROR_EXIT:
+        fprintf(stderr, "Error: Exit failed.\n");
+        break;
+
+    case ERROR_INPUT_EXCEED:
+        fprintf(stderr, "Error: Input exceeds allowed limit.\n");
+        break;
+
+    case ERROR_READING_INPUT:
+        perror("Reading input failed");
+        break;
+
+        // 重定向的错误
+    case ERROR_MANY_IN:
+        fprintf(stderr, "Error: Too many input redirection files.\n");
+        break;
+
+    case ERROR_MANY_OUT:
+        fprintf(stderr, "Error: Too many output redirection files.\n");
+        break;
+
+    case ERROR_FILE_NOT_EXIST:
+        fprintf(stderr, "Error: Redirected file does not exist.\n");
+        break;
+
+        // 管道的错误
+    case ERROR_PIPE:
+        fprintf(stderr, "Error: Pipe creation failed.\n");
+        break;
+
+    case ERROR_PIPE_MISS_PARAMETER:
+        fprintf(stderr, "Error: Missing parameters for pipe.\n");
+        break;
+
+    default:
+        fprintf(stderr, "Unknown error occurred.\n");
+        break;
+    }
 }
